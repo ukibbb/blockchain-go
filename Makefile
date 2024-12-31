@@ -5,4 +5,4 @@ run: build
 	@./bin/blockchain
 
 test:
-	go test ./... --race -v 
+	go test ./...  
