@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/gob"
 	"errors"
-	"io"
 
 	"github.com/ukibbb/blockchain-go/crypto"
 	"github.com/ukibbb/blockchain-go/types"
@@ -81,10 +80,10 @@ func (b *Block) Hash(hasher Hasher[*Header]) types.Hash {
 	return b.hash
 }
 
-func (b *Block) Decode(r io.Reader, dec Decoder[*Block]) error {
-	return dec.Decode(r, b)
+func (b *Block) Decode(dec Decoder[*Block]) error {
+	return dec.Decode(b)
 }
 
-func (b *Block) Encode(w io.Writer, enc Encoder[*Block]) error {
-	return enc.Encode(w, b)
+func (b *Block) Encode(enc Encoder[*Block]) error {
+	return enc.Encode(b)
 }
