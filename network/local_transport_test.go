@@ -1,6 +1,7 @@
 package network
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -31,7 +32,7 @@ func TestSendMessage(t *testing.T) {
 	assert.Nil(t, tra.SendMessage(trb.Addr(), msg))
 
 	rpc := <-trb.Consume()
-	assert.Equal(t, rpc.Payload, msg)
+	assert.Equal(t, rpc.Payload, bytes.NewReader(msg))
 	assert.Equal(t, rpc.From, tra.Addr())
 
 }
