@@ -55,3 +55,12 @@ func (t *LocalTransport) SendMessage(to NetAddr, payload []byte) error {
 func (t *LocalTransport) Addr() NetAddr {
 	return t.addr
 }
+
+func (t *LocalTransport) Broadcast(payload []byte) error {
+	for _, peer := range t.peers {
+		if err := t.SendMessage(peer.Addr(), payload); err != nil {
+			return err
+		}
+	}
+	return nil
+}
