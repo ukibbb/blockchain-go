@@ -46,8 +46,8 @@ func randomBlock(t *testing.T, height uint32, prevBlockHash types.Hash) *Block {
 		Nonce:         987654567,
 	}
 
-	b, _ := NewBlock(h, []Transaction{tx})
-	dataHash, err := CalculateDataHash([]Transaction{tx})
+	b, _ := NewBlock(h, []*Transaction{tx})
+	dataHash, err := CalculateDataHash([]*Transaction{tx})
 
 	assert.Nil(t, err)
 
