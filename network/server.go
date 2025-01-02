@@ -44,7 +44,7 @@ func NewServer(opts ServerOpts) (*Server, error) {
 		opts.Logger = log.NewLogfmtLogger(os.Stdout)
 		opts.Logger = log.With(opts.Logger, "ID", opts.ID)
 	}
-	chain, err := core.NewBlockChain(genesisBlock())
+	chain, err := core.NewBlockChain(opts.Logger, genesisBlock())
 	if err != nil {
 		return nil, err
 	}
@@ -121,6 +121,10 @@ func (s *Server) broadcast(msg []byte) error {
 	return nil
 }
 
+func (s *Server) broadcastBlock(b *core.Block) error {
+	return nil
+}
+
 func (s *Server) broadcastTx(tx *core.Transaction) error {
 	buf := new(bytes.Buffer)
 	if err := tx.Encode(core.NewGobTxEncoder(buf)); err != nil {
@@ -160,7 +164,11 @@ func (s *Server) createNewBlock() error {
 		return err
 	}
 
-	block, err := core.NewBlockFromPrevHeader(currentHeader, nil)
+	// for now we are putting everything in block
+	// in reality we can put everything
+	txx := s.memPool.Transactions()
+
+	block, err := core.NewBlockFromPrevHeader(currentHeader, txx)
 
 	if err != nil {
 		return err
@@ -173,6 +181,8 @@ func (s *Server) createNewBlock() error {
 	if err := s.chain.AddBlock(block); err != nil {
 		return err
 	}
+
+	s.memPool.Flush()
 
 	return nil
 }
@@ -192,7 +202,7 @@ func genesisBlock() *core.Block {
 		Version:   1,
 		DataHash:  types.Hash{},
 		Height:    0,
-		Timestamp: uint64(time.Now().UnixNano()),
+		Timestamp: 000000000,
 	}
 	b, _ := core.NewBlock(h, nil)
 	return b
