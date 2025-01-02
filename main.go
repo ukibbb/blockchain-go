@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"log"
 	"math/rand"
 	"strconv"
@@ -15,35 +16,40 @@ import (
 
 func main() {
 	trLocal := network.NewLocalTransport("LOCAL")
-	trRemote := network.NewLocalTransport("REMOTE")
+	trRemoteA := network.NewLocalTransport("REMOTE_A")
+	trRemoteB := network.NewLocalTransport("REMOTE_B")
+	trRemoteC := network.NewLocalTransport("REMOTE_C")
 
-	trLocal.Connect(trRemote)
-	trRemote.Connect(trLocal)
+	trLocal.Connect(trRemoteA)
+	trRemoteA.Connect(trRemoteB)
+	trRemoteB.Connect(trRemoteC)
+
+	trRemoteA.Connect(trLocal)
+
+	initRemoteServers([]network.Transport{trRemoteA, trRemoteB, trRemoteC})
 
 	go func() {
 		for {
 			// trRemote.SendMessage(trLocal.Addr(), []byte("Helloworld"))
-			if err := sendTransaction(trRemote, trLocal.Addr()); err != nil {
+			if err := sendTransaction(trRemoteA, trLocal.Addr()); err != nil {
 				logrus.Error(err)
 			}
-			time.Sleep(time.Second)
+			time.Sleep(2 * time.Second)
 		}
 	}()
 
 	privKey := crypto.GeneratePrivateKey()
+	localServer := makeServer("LOCAL", trLocal, &privKey)
+	localServer.Start()
 
-	opts := network.ServerOpts{
-		PrivateKey: &privKey,
-		ID:         "LOCAL",
-		Transports: []network.Transport{trLocal},
+}
+
+func initRemoteServers(trs []network.Transport) {
+	for i := 0; i < len(trs); i++ {
+		id := fmt.Sprintf("REMOTE_%d", i)
+		s := makeServer(id, trs[i], nil)
+		go s.Start()
 	}
-
-	server, err := network.NewServer(opts)
-	if err != nil {
-		log.Fatal(err)
-	}
-	server.Start()
-
 }
 
 func sendTransaction(tr network.Transport, to network.NetAddr) error {
@@ -60,4 +66,18 @@ func sendTransaction(tr network.Transport, to network.NetAddr) error {
 	msg := network.NewMessage(network.MessageTypeTx, buf.Bytes())
 
 	return tr.SendMessage(to, msg.Bytes())
+}
+
+func makeServer(id string, tr network.Transport, pk *crypto.PrivateKey) *network.Server {
+	opts := network.ServerOpts{
+		PrivateKey: pk,
+		ID:         id,
+		Transports: []network.Transport{tr},
+	}
+
+	s, err := network.NewServer(opts)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return s
 }
