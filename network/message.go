@@ -1,6 +1,6 @@
 package network
 
-type GetBlocks struct {
+type GetBlocksMessage struct {
 	// from this height to that height
 	From uint32
 	To   uint32
