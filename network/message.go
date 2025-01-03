@@ -1,5 +1,11 @@
 package network
 
+type GetBlocks struct {
+	// from this height to that height
+	From uint32
+	To   uint32
+}
+
 type GetStatusMessage struct{}
 
 type StatusMessage struct {
