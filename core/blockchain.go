@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"os"
 	"sync"
 
 	"github.com/go-kit/log"
@@ -19,7 +20,7 @@ type BlockChain struct {
 
 func NewBlockChain(l log.Logger, genesis *Block) (*BlockChain, error) {
 	bc := &BlockChain{
-		logger: l,
+		logger: log.NewLogfmtLogger(os.Stdout),
 		store:  NewMemoryStore(),
 	}
 	bc.SetValidator(NewBlockValidator(bc))
