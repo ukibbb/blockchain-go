@@ -5,6 +5,7 @@ import (
 	"encoding/gob"
 	"fmt"
 	"io"
+	"net"
 
 	"github.com/sirupsen/logrus"
 	"github.com/ukibbb/blockchain-go/core"
@@ -18,6 +19,7 @@ const (
 	MessageTypeGetBlocks MessageType = 0x3
 	MessageTypeStatus    MessageType = 0x4
 	MessageTypeGetStatus MessageType = 0x5
+	MessageTypeBlocks    MessageType = 0x6
 )
 
 type Message struct {
@@ -26,7 +28,7 @@ type Message struct {
 }
 
 type RPC struct {
-	From    NetAddr
+	From    net.Addr
 	Payload io.Reader
 }
 
@@ -43,7 +45,7 @@ func (m *Message) Bytes() []byte {
 }
 
 type DecodedMessage struct {
-	From NetAddr
+	From net.Addr
 	Data any
 }
 
@@ -96,6 +98,24 @@ func DefaultRPCDecodeFunc(rpc RPC) (*DecodedMessage, error) {
 		return &DecodedMessage{
 			From: rpc.From,
 			Data: &GetStatusMessage{},
+		}, nil
+	case MessageTypeGetBlocks:
+		getBlocks := new(GetBlocksMessage)
+		if err := gob.NewDecoder(bytes.NewReader(msg.Data)).Decode(getBlocks); err != nil {
+			return nil, err
+		}
+		return &DecodedMessage{
+			From: rpc.From,
+			Data: getBlocks,
+		}, nil
+	case MessageTypeBlocks:
+		blocks := new(BlocksMessage)
+		if err := gob.NewDecoder(bytes.NewReader(msg.Data)).Decode(blocks); err != nil {
+			return nil, err
+		}
+		return &DecodedMessage{
+			From: rpc.From,
+			Data: blocks,
 		}, nil
 	}
 
