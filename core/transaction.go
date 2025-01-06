@@ -12,8 +12,8 @@ import (
 type TxType byte
 
 const (
-	TxTypeCollection TxType = iota
-	TxTypeMint
+	TxTypeCollection TxType = iota // 0x0
+	TxTypeMint                     // 0x01
 )
 
 type CollectionTx struct {
@@ -22,61 +22,34 @@ type CollectionTx struct {
 }
 
 type MintTx struct {
-	Fee        int64
-	NFT        types.Hash
-	Collection types.Hash
-
-	MetaData []byte
-
+	Fee             int64
+	NFT             types.Hash
+	Collection      types.Hash
+	MetaData        []byte
 	CollectionOwner crypto.PublicKey
 	Signature       crypto.Signature
 }
 
 type Transaction struct {
-	Type    TxType
+	// Only used for native NFT logic
 	TxInner any
-	Data    []byte
-
-	// public key of transaction is
-	// public key of the sender
+	// Any arbitrary data for the VM
+	Data      []byte
+	To        crypto.PublicKey
+	Value     uint64
 	From      crypto.PublicKey
-	Sginature *crypto.Signature
+	Signature *crypto.Signature
+	Nonce     int64
 
-	// cached version of tx data
+	// cached version of the tx data hash
 	hash types.Hash
-
-	Nonce uint64
-
-	// firstSeen is timestamp of when this ts is seen locally
-	firstSeen int64
 }
 
 func NewTransaction(data []byte) *Transaction {
 	return &Transaction{
 		Data:  data,
-		Nonce: uint64(rand.Int63n(1000000000000000)),
+		Nonce: rand.Int63n(1000000000000000),
 	}
-}
-
-func (tx *Transaction) Sign(privKey crypto.PrivateKey) error {
-	sig, err := privKey.Sign(tx.Data)
-	if err != nil {
-		return err
-	}
-	tx.From = privKey.PublicKey()
-	tx.Sginature = sig
-	return nil
-}
-
-func (tx *Transaction) Verify() error {
-	if tx.Sginature == nil {
-		return fmt.Errorf("transaction has no signature")
-	}
-
-	if !tx.Sginature.Verify(tx.From, tx.Data) {
-		return fmt.Errorf("invalida transaction signature")
-	}
-	return nil
 }
 
 func (tx *Transaction) Hash(hasher Hasher[*Transaction]) types.Hash {
@@ -86,17 +59,36 @@ func (tx *Transaction) Hash(hasher Hasher[*Transaction]) types.Hash {
 	return tx.hash
 }
 
-func (tx *Transaction) SetFirstSeen(t int64) {
-	tx.firstSeen = t
+func (tx *Transaction) Sign(privKey crypto.PrivateKey) error {
+	hash := tx.Hash(TxHasher{})
+	sig, err := privKey.Sign(hash.ToSlice())
+	if err != nil {
+		return err
+	}
+
+	tx.From = privKey.PublicKey()
+	tx.Signature = sig
+
+	return nil
 }
 
-func (tx *Transaction) FirstSeen() int64 {
-	return tx.firstSeen
+func (tx *Transaction) Verify() error {
+	if tx.Signature == nil {
+		return fmt.Errorf("transaction has no signature")
+	}
+
+	hash := tx.Hash(TxHasher{})
+	if !tx.Signature.Verify(tx.From, hash.ToSlice()) {
+		return fmt.Errorf("invalid transaction signature")
+	}
+
+	return nil
 }
 
 func (tx *Transaction) Decode(dec Decoder[*Transaction]) error {
 	return dec.Decode(tx)
 }
+
 func (tx *Transaction) Encode(enc Encoder[*Transaction]) error {
 	return enc.Encode(tx)
 }
