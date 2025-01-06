@@ -1,14 +1,41 @@
 package core
 
 import (
+	"encoding/gob"
 	"fmt"
+	"math/rand"
 
 	"github.com/ukibbb/blockchain-go/crypto"
 	"github.com/ukibbb/blockchain-go/types"
 )
 
+type TxType byte
+
+const (
+	TxTypeCollection TxType = iota
+	TxTypeMint
+)
+
+type CollectionTx struct {
+	Fee      int64
+	MetaData []byte
+}
+
+type MintTx struct {
+	Fee        int64
+	NFT        types.Hash
+	Collection types.Hash
+
+	MetaData []byte
+
+	CollectionOwner crypto.PublicKey
+	Signature       crypto.Signature
+}
+
 type Transaction struct {
-	Data []byte
+	Type    TxType
+	TxInner any
+	Data    []byte
 
 	// public key of transaction is
 	// public key of the sender
@@ -17,13 +44,17 @@ type Transaction struct {
 
 	// cached version of tx data
 	hash types.Hash
+
+	Nonce uint64
+
 	// firstSeen is timestamp of when this ts is seen locally
 	firstSeen int64
 }
 
 func NewTransaction(data []byte) *Transaction {
 	return &Transaction{
-		Data: data,
+		Data:  data,
+		Nonce: uint64(rand.Int63n(1000000000000000)),
 	}
 }
 
@@ -68,4 +99,9 @@ func (tx *Transaction) Decode(dec Decoder[*Transaction]) error {
 }
 func (tx *Transaction) Encode(enc Encoder[*Transaction]) error {
 	return enc.Encode(tx)
+}
+
+func init() {
+	gob.Register(CollectionTx{})
+	gob.Register(MintTx{})
 }
