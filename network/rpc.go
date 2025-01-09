@@ -121,6 +121,6 @@ func DefaultRPCDecodeFunc(rpc RPC) (*DecodedMessage, error) {
 
 }
 
-type RPCPRocessor interface {
+type RPCProcessor interface {
 	ProcessMessage(*DecodedMessage) error
 }
