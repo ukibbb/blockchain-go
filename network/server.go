@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
+	"github.com/ukibbb/blockchain-go/api"
 	"github.com/ukibbb/blockchain-go/core"
 	"github.com/ukibbb/blockchain-go/crypto"
 	"github.com/ukibbb/blockchain-go/types"
@@ -18,33 +19,32 @@ import (
 var defaultBlockTime = 5 * time.Second
 
 type ServerOpts struct {
+	APIListenAddr string
 	SeedNodes     []string
 	ListenAddr    string
 	TCPTransport  *TCPTransport
 	ID            string
 	Logger        log.Logger
 	RPCDecodeFunc RPCDecodeFunc
-	RPCPRocessor  RPCPRocessor
-	Transports    []Transport
+	RPCProcessor  RPCProcessor
 	BlockTime     time.Duration
 	PrivateKey    *crypto.PrivateKey
 }
 
 type Server struct {
-	SeedNodes    []string
 	TCPTransport *TCPTransport
-	peerMap      map[net.Addr]*TCPPeer
+	peerCh       chan *TCPPeer
 
-	mu     sync.RWMutex
-	peerCh chan *TCPPeer
+	mu      sync.RWMutex
+	peerMap map[net.Addr]*TCPPeer
 
 	ServerOpts
-	memPool     *TxPool
-	chain       *core.BlockChain
+	mempool     *TxPool
+	chain       *core.Blockchain
 	isValidator bool
-
-	rpcCh  chan RPC
-	quitch chan struct{}
+	rpcCh       chan RPC
+	quitCh      chan struct{}
+	txChan      chan *core.Transaction
 }
 
 func NewServer(opts ServerOpts) (*Server, error) {
@@ -55,33 +55,53 @@ func NewServer(opts ServerOpts) (*Server, error) {
 		opts.RPCDecodeFunc = DefaultRPCDecodeFunc
 	}
 	if opts.Logger == nil {
-		opts.Logger = log.NewLogfmtLogger(os.Stdout)
+		opts.Logger = log.NewLogfmtLogger(os.Stderr)
 		opts.Logger = log.With(opts.Logger, "addr", opts.ID)
 	}
-	chain, err := core.NewBlockChain(opts.Logger, genesisBlock())
+
+	chain, err := core.NewBlockchain(opts.Logger, genesisBlock())
 	if err != nil {
 		return nil, err
 	}
+
+	// Channel being used to communicate between the JSON RPC server
+	// and the node that will process this message.
+	txChan := make(chan *core.Transaction)
+
+	// Only boot up the API server if the config has a valid port number.
+	if len(opts.APIListenAddr) > 0 {
+		apiServerCfg := api.ServerConfig{
+			Logger:     opts.Logger,
+			ListenAddr: opts.APIListenAddr,
+		}
+		apiServer := api.NewServer(apiServerCfg, chain, txChan)
+		go apiServer.Start()
+
+		opts.Logger.Log("msg", "JSON API server running", "port", opts.APIListenAddr)
+	}
+
 	peerCh := make(chan *TCPPeer)
 	tr := NewTCPTransport(opts.ListenAddr, peerCh)
+
 	s := &Server{
-		SeedNodes:    opts.SeedNodes,
 		TCPTransport: tr,
-		peerCh:       make(chan *TCPPeer),
+		peerCh:       peerCh,
 		peerMap:      make(map[net.Addr]*TCPPeer),
 		ServerOpts:   opts,
 		chain:        chain,
-		memPool:      NewTxPool(1000),
-		// if we are validator we need a private key
-		// if it's simple node we are not going to
-		// sign blocks
-		isValidator: opts.PrivateKey != nil,
-		rpcCh:       make(chan RPC),
-		quitch:      make(chan struct{}, 1),
+		mempool:      NewTxPool(1000),
+		isValidator:  opts.PrivateKey != nil,
+		rpcCh:        make(chan RPC),
+		quitCh:       make(chan struct{}, 1),
+		txChan:       txChan,
 	}
-	// if not server process from server options, server is processor.
-	if s.RPCPRocessor == nil {
-		s.RPCPRocessor = s
+
+	s.TCPTransport.peerCh = peerCh
+
+	// If we dont got any processor from the server options, we going to use
+	// the server as default.
+	if s.RPCProcessor == nil {
+		s.RPCProcessor = s
 	}
 
 	if s.isValidator {
@@ -90,15 +110,36 @@ func NewServer(opts ServerOpts) (*Server, error) {
 
 	return s, nil
 }
+
+func (s *Server) bootstrapNetwork() {
+	for _, addr := range s.SeedNodes {
+		fmt.Println("trying to connect to ", addr)
+
+		go func(addr string) {
+			conn, err := net.Dial("tcp", addr)
+			if err != nil {
+				fmt.Printf("could not connect to %+v\n", conn)
+				return
+			}
+
+			s.peerCh <- &TCPPeer{
+				conn: conn,
+			}
+		}(addr)
+	}
+}
+
 func (s *Server) Start() {
 	s.TCPTransport.Start()
 
-	s.bootstrapNework()
+	time.Sleep(time.Second * 1)
+
+	s.bootstrapNetwork()
+
+	s.Logger.Log("msg", "accepting TCP connection on", "addr", s.ListenAddr, "id", s.ID)
 
 free:
 	for {
-		// default here would keep looping
-		// and it's cpu intensive.
 		select {
 		case peer := <-s.peerCh:
 			s.peerMap[peer.conn.RemoteAddr()] = peer
@@ -110,53 +151,47 @@ free:
 				continue
 			}
 
-			s.Logger.Log("msg", "peer added to the server", "outgoing", peer.Outgoing, peer.conn.RemoteAddr())
+			s.Logger.Log("msg", "peer added to the server", "outgoing", peer.Outgoing, "addr", peer.conn.RemoteAddr())
+
+		case tx := <-s.txChan:
+			if err := s.processTransaction(tx); err != nil {
+				s.Logger.Log("process TX error", err)
+			}
 
 		case rpc := <-s.rpcCh:
 			msg, err := s.RPCDecodeFunc(rpc)
 			if err != nil {
-				s.Logger.Log("error", err)
+				s.Logger.Log("RPC error", err)
 				continue
 			}
-			if err := s.ProcessMessage(msg); err != nil {
+
+			if err := s.RPCProcessor.ProcessMessage(msg); err != nil {
 				if err != core.ErrBlockKnown {
 					s.Logger.Log("error", err)
-
 				}
 			}
-		case <-s.quitch:
+
+		case <-s.quitCh:
 			break free
 		}
 	}
-}
-func (s *Server) bootstrapNework() {
-	for _, addr := range s.SeedNodes {
-		fmt.Println("trying to connect to ", addr)
-		go func(addr string) {
-			conn, err := net.Dial("tcp", addr)
-			if err != nil {
-				fmt.Printf("could not connect to %+v\n", conn)
-				return
-			}
-			s.peerCh <- &TCPPeer{
-				conn: conn,
-			}
 
-		}(addr)
-
-	}
-
+	s.Logger.Log("msg", "Server is shutting down")
 }
 
 func (s *Server) validatorLoop() {
 	ticker := time.NewTicker(s.BlockTime)
-	s.Logger.Log(
-		"msg", "starting validator loop",
-		"blocktime", s.BlockTime,
-	)
+
+	s.Logger.Log("msg", "Starting validator loop", "blockTime", s.BlockTime)
+
 	for {
+		fmt.Println("creating new block")
+
+		if err := s.createNewBlock(); err != nil {
+			s.Logger.Log("create block error", err)
+		}
+
 		<-ticker.C
-		s.createNewBlock()
 	}
 }
 
@@ -167,30 +202,20 @@ func (s *Server) ProcessMessage(msg *DecodedMessage) error {
 	case *core.Block:
 		return s.processBlock(t)
 	case *GetStatusMessage:
-		s.processGetStatusMessage(msg.From)
+		return s.processGetStatusMessage(msg.From, t)
 	case *StatusMessage:
-		s.processStatusMessage(msg.From, t)
+		return s.processStatusMessage(msg.From, t)
 	case *GetBlocksMessage:
-		s.processGetBlocksMessage(msg.From, t)
+		return s.processGetBlocksMessage(msg.From, t)
 	case *BlocksMessage:
-		s.processBlocksMessage(msg.From, t)
+		return s.processBlocksMessage(msg.From, t)
 	}
 
-	return nil
-}
-func (s *Server) processBlocksMessage(from net.Addr, data *BlocksMessage) error {
-	s.Logger.Log("msg", "received BLOCKS", "from", from)
-	for _, block := range data.Blocks {
-		if err := s.chain.AddBlock(block); err != nil {
-			fmt.Printf("adding block error %s\n", err)
-			continue
-		}
-	}
 	return nil
 }
 
 func (s *Server) processGetBlocksMessage(from net.Addr, data *GetBlocksMessage) error {
-	s.Logger.Log("msg", "recieved getBlocks message", "from", from)
+	s.Logger.Log("msg", "received getBlocks message", "from", from)
 
 	var (
 		blocks    = []*core.Block{}
@@ -229,46 +254,58 @@ func (s *Server) processGetBlocksMessage(from net.Addr, data *GetBlocksMessage) 
 	return peer.Send(msg.Bytes())
 }
 
+func (s *Server) sendGetStatusMessage(peer *TCPPeer) error {
+	var (
+		getStatusMsg = new(GetStatusMessage)
+		buf          = new(bytes.Buffer)
+	)
+	if err := gob.NewEncoder(buf).Encode(getStatusMsg); err != nil {
+		return err
+	}
+
+	msg := NewMessage(MessageTypeGetStatus, buf.Bytes())
+	return peer.Send(msg.Bytes())
+}
+
+func (s *Server) broadcast(payload []byte) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for netAddr, peer := range s.peerMap {
+		if err := peer.Send(payload); err != nil {
+			fmt.Printf("peer send error => addr %s [err: %s]\n", netAddr, err)
+		}
+	}
+
+	return nil
+}
+
+func (s *Server) processBlocksMessage(from net.Addr, data *BlocksMessage) error {
+	s.Logger.Log("msg", "received BLOCKS!!!!!!!!", "from", from)
+
+	for _, block := range data.Blocks {
+		if err := s.chain.AddBlock(block); err != nil {
+			s.Logger.Log("error", err.Error())
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (s *Server) processStatusMessage(from net.Addr, data *StatusMessage) error {
-	s.Logger.Log("msg", "received STATUS message ", "from", from)
+	s.Logger.Log("msg", "received STATUS message", "from", from)
+
 	if data.CurrentHeight <= s.chain.Height() {
-		s.Logger.Log(
-			"msg",
-			"cannoct sync block height to low",
-			"outHeight", s.chain.Height(),
-			"thier height", data.CurrentHeight,
-			"addr", from,
-		)
+		s.Logger.Log("msg", "cannot sync blockHeight to low", "ourHeight", s.chain.Height(), "theirHeight", data.CurrentHeight, "addr", from)
 		return nil
 	}
-	// in this case i am sure that node has blocks higher than this
-	// var (
-	// 	getBlocksMessage = &GetBlocksMessage{
-	// 		From: s.chain.Height() + 1, // causse height is genesis block
-	// 		To:   0,
-	// 	}
-	// 	buf = new(bytes.Buffer)
-	// )
 
-	// if err := gob.NewEncoder(buf).Encode(getBlocksMessage); err != nil {
-	// 	return err
-	// }
-
-	// msg := NewMessage(MessageTypeGetBlocks, buf.Bytes())
-
-	// s.mu.RLock()
-	// defer s.mu.RUnlock()
-	// peer, ok := s.peerMap[from]
-	// if !ok {
-	// 	return fmt.Errorf("peer %s not known", peer.conn.RemoteAddr())
-	// }
-
-	// return peer.Send(msg.Bytes())
 	go s.requestBlocksLoop(from)
-	return nil
 
+	return nil
 }
-func (s *Server) processGetStatusMessage(from net.Addr) error {
+
+func (s *Server) processGetStatusMessage(from net.Addr, data *GetStatusMessage) error {
 	s.Logger.Log("msg", "received getStatus message", "from", from)
 
 	statusMessage := &StatusMessage{
@@ -292,39 +329,54 @@ func (s *Server) processGetStatusMessage(from net.Addr) error {
 	msg := NewMessage(MessageTypeStatus, buf.Bytes())
 
 	return peer.Send(msg.Bytes())
-
 }
-func (s *Server) sendGetStatusMessage(peer *TCPPeer) error {
-	var (
-		getStatusMsg = new(GetStatusMessage)
-		buf          = new(bytes.Buffer)
-	)
 
-	if err := gob.NewEncoder(buf).Encode(getStatusMsg); err != nil {
+func (s *Server) processBlock(b *core.Block) error {
+	if err := s.chain.AddBlock(b); err != nil {
+		s.Logger.Log("error", err.Error())
 		return err
 	}
 
-	msg := NewMessage(MessageTypeGetStatus, buf.Bytes())
-	return peer.Send(msg.Bytes())
-}
+	go s.broadcastBlock(b)
 
-func (s *Server) broadcast(payload []byte) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for netAddr, peer := range s.peerMap {
-		if err := peer.Send(payload); err != nil {
-			fmt.Printf("send peer error => addr %s [err: %s]\n", netAddr, err)
-		}
-
-	}
 	return nil
 }
 
+func (s *Server) processTransaction(tx *core.Transaction) error {
+	hash := tx.Hash(core.TxHasher{})
+
+	if s.mempool.Contains(hash) {
+		return nil
+	}
+
+	if err := tx.Verify(); err != nil {
+		return err
+	}
+
+	// s.Logger.Log(
+	// 	"msg", "adding new tx to mempool",
+	// 	"hash", hash,
+	// 	"mempoolPending", s.mempool.PendingCount(),
+	// )
+
+	go s.broadcastTx(tx)
+
+	s.mempool.Add(tx)
+
+	return nil
+}
+
+// TODO: Find a way to make sure we dont keep syncing when we are at the highest
+// block height in the network.
 func (s *Server) requestBlocksLoop(peer net.Addr) error {
 	ticker := time.NewTicker(3 * time.Second)
+
 	for {
 		ourHeight := s.chain.Height()
-		s.Logger.Log("msg", "requesting new blocks", "currentHeight", ourHeight)
+
+		s.Logger.Log("msg", "requesting new blocks", "requesting height", ourHeight+1)
+
+		// In this case we are 100% sure that the node has blocks heigher than us.
 		getBlocksMessage := &GetBlocksMessage{
 			From: ourHeight + 1,
 			To:   0,
@@ -336,73 +388,42 @@ func (s *Server) requestBlocksLoop(peer net.Addr) error {
 		}
 
 		s.mu.RLock()
-
 		defer s.mu.RUnlock()
 
 		msg := NewMessage(MessageTypeGetBlocks, buf.Bytes())
 		peer, ok := s.peerMap[peer]
-
 		if !ok {
 			return fmt.Errorf("peer %s not known", peer.conn.RemoteAddr())
 		}
+
 		if err := peer.Send(msg.Bytes()); err != nil {
-			s.Logger.Log("error", "failed send to peer", "err", err, "peer", peer)
+			s.Logger.Log("error", "failed to send to peer", "err", err, "peer", peer)
 		}
 
 		<-ticker.C
 	}
 }
 
-func (s *Server) processBlock(b *core.Block) error {
-	if err := s.chain.AddBlock(b); err != nil {
-		return err
-	}
-	go s.broadcastBlock(b)
-	return nil
-}
-
 func (s *Server) broadcastBlock(b *core.Block) error {
-	buf := new(bytes.Buffer)
+	buf := &bytes.Buffer{}
 	if err := b.Encode(core.NewGobBlockEncoder(buf)); err != nil {
 		return err
 	}
+
 	msg := NewMessage(MessageTypeBlock, buf.Bytes())
 
 	return s.broadcast(msg.Bytes())
 }
 
 func (s *Server) broadcastTx(tx *core.Transaction) error {
-	buf := new(bytes.Buffer)
+	buf := &bytes.Buffer{}
 	if err := tx.Encode(core.NewGobTxEncoder(buf)); err != nil {
 		return err
 	}
+
 	msg := NewMessage(MessageTypeTx, buf.Bytes())
 
 	return s.broadcast(msg.Bytes())
-}
-
-func (s *Server) processTransaction(tx *core.Transaction) error {
-	hash := tx.Hash(core.TxHasher{})
-	if s.memPool.Contains(hash) {
-		return nil
-	}
-
-	if err := tx.Verify(); err != nil {
-		return err
-	}
-
-	tx.SetFirstSeen(time.Now().UnixNano())
-
-	// s.Logger.Log(
-	// 	"msg", "adding new tx mem",
-	// 	"hash", hash,
-	// 	"mempoolLength", s.memPool.PendingCount(),
-	// )
-
-	go s.broadcastTx(tx)
-
-	s.memPool.Add(tx)
-	return nil
 }
 
 func (s *Server) createNewBlock() error {
@@ -411,12 +432,13 @@ func (s *Server) createNewBlock() error {
 		return err
 	}
 
-	// for now we are putting everything in block
-	// in reality we can put everything
-	txx := s.memPool.Pending()
+	// For now we are going to use all transactions that are in the pending pool
+	// Later on when we know the internal structure of our transaction
+	// we will implement some kind of complexity function to determine how
+	// many transactions can be included in a block.
+	txx := s.mempool.Pending()
 
 	block, err := core.NewBlockFromPrevHeader(currentHeader, txx)
-
 	if err != nil {
 		return err
 	}
@@ -429,7 +451,9 @@ func (s *Server) createNewBlock() error {
 		return err
 	}
 
-	s.memPool.ClearPending()
+	// TODO(@anthdm): pending pool of tx should only reflect on validator nodes.
+	// Right now "normal nodes" does not have their pending pool cleared.
+	s.mempool.ClearPending()
 
 	go s.broadcastBlock(block)
 
@@ -437,13 +461,21 @@ func (s *Server) createNewBlock() error {
 }
 
 func genesisBlock() *core.Block {
-	h := &core.Header{
+	header := &core.Header{
 		Version:   1,
 		DataHash:  types.Hash{},
 		Height:    0,
-		Timestamp: 000000000,
+		Timestamp: 000000,
 	}
-	b, _ := core.NewBlock(h, nil)
+
+	b, _ := core.NewBlock(header, nil)
+
+	coinbase := crypto.PublicKey{}
+	tx := core.NewTransaction(nil)
+	tx.From = coinbase
+	tx.To = coinbase
+	tx.Value = 10_000_000
+	b.Transactions = append(b.Transactions, tx)
 
 	privKey := crypto.GeneratePrivateKey()
 	if err := b.Sign(privKey); err != nil {
